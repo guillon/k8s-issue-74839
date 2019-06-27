@@ -18,7 +18,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"log"
+//	"log"
 	"net"
 )
 
@@ -120,7 +120,7 @@ func (t *tcpPacket) encode(src, dest net.IP, data []byte) []byte {
 }
 
 func checksumTCP(src, dest net.IP, tcpHeader, data []byte) uint16 {
-	log.Printf("calling checksumTCP: %v %v %v %v", src, dest, tcpHeader, data)
+	//log.Printf("calling checksumTCP: %v %v %v %v", src, dest, tcpHeader, data)
 	chk := &tcpChecksumer{}
 
 	// Encode pseudoheader.
@@ -134,7 +134,7 @@ func checksumTCP(src, dest net.IP, tcpHeader, data []byte) uint16 {
 	chk.add(tcpHeader)
 	chk.add(data)
 
-	log.Printf("checksumer: %+v", chk)
+	//log.Printf("checksumer: %+v", chk)
 
 	return chk.finalize()
 }
@@ -150,12 +150,12 @@ func (c *tcpChecksumer) finalize() uint16 {
 	if c.length%2 > 0 {
 		ret += uint32(c.oddByte)
 	}
-	log.Println("ret: ", ret)
+	//log.Println("ret: ", ret)
 	for ret>>16 > 0 {
 		ret = ret&0xffff + ret>>16
-		log.Println("ret: ", ret)
+		//log.Println("ret: ", ret)
 	}
-	log.Println("ret: ", ret)
+	//log.Println("ret: ", ret)
 	return ^uint16(ret)
 }
 

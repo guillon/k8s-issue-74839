@@ -1,18 +1,29 @@
 package main
 
 import (
+	"os"
 	"log"
 	"net"
 	"time"
+	"strconv"
 )
 
 func main() {
+	var port int
+	port = 9000
+	if len(os.Args) > 1 {
+		p, err := strconv.Atoi(os.Args[1])
+		if err != nil {
+			panic(err)
+		}
+		port = p
+	}
 	ip := getIP().String()
 	log.Printf("external ip: %v", ip)
 
-	go probe(ip)
+	go probe(ip, port)
 
-	log.Printf("listen on %v:9000", "0.0.0.0")
+	log.Printf("listen on %v:%v", "0.0.0.0", port)
 
 	listener, err := net.Listen("tcp", "0.0.0.0:9000")
 	if err != nil {
@@ -24,6 +35,7 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
+		log.Printf("Accepted connection: %+v", conn)
 
 		go func(conn net.Conn) {
 			time.Sleep(10 * time.Second)
@@ -32,20 +44,22 @@ func main() {
 	}
 }
 
-func probe(ip string) {
+func probe(ip string, port int) {
 	log.Printf("probing %v", ip)
 
 	ipAddr, err := net.ResolveIPAddr("ip4:tcp", ip)
 	if err != nil {
 		panic(err)
 	}
-
+	
+	log.Printf("IP Addr: %v", ipAddr)
 	conn, err := net.ListenIP("ip4:tcp", ipAddr)
 	if err != nil {
 		panic(err)
 	}
 
 	pending := make(map[string]uint32)
+	established := make(map[string]bool)
 
 	var buffer [4096]byte
 	for {
@@ -61,41 +75,61 @@ func probe(ip string) {
 			log.Printf("tcp packet parse error: %v", err)
 			continue
 		}
+		remoteIP := net.ParseIP(addr.String())
+		localIP := net.ParseIP(conn.LocalAddr().String())
+		connect_id := localIP.String() + ":" + strconv.Itoa(int(pkt.DestPort)) + "-" + remoteIP.String() + ":" + strconv.Itoa(int(pkt.SrcPort))
 
-		if pkt.DestPort != 9000 {
+		if localIP.String() != ipAddr.String() || int(pkt.DestPort) != port {
 			continue
 		}
 
-		log.Printf("tcp packet: %+v, flag: %v, data: %v, addr: %v", pkt, pkt.FlagString(), data, addr)
+		log.Printf("conn %v: tcp packet: %+v, flag: %v, data: %v, addr: %v", connect_id, pkt, pkt.FlagString(), data, addr)
 
 		if pkt.Flags&SYN != 0 {
-			pending[addr.String()] = pkt.Seq + 1
+			pending[connect_id] = pkt.Seq + 1
 			continue
 		}
 		if pkt.Flags&RST != 0 {
-			panic("RST received")
+			if established[connect_id] {
+				log.Printf("conn %v: RST received", connect_id)
+				panic("RST received")
+			}
+		}
+		if pkt.Flags&FIN != 0 {
+			if established[connect_id] {
+				log.Printf("conn %v: normal temination", connect_id)
+				delete(established, connect_id)
+			}
 		}
 		if pkt.Flags&ACK != 0 {
-			if seq, ok := pending[addr.String()]; ok {
-				log.Println("connection established")
-				delete(pending, addr.String())
-
-				badPkt := &tcpPacket{
-					SrcPort:    pkt.DestPort,
-					DestPort:   pkt.SrcPort,
-					Ack:        seq,
-					Seq:        pkt.Ack - 100000,      // Bad: seq out-of-window
-					Flags:      (5 << 12) | PSH | ACK, // Offset and Flags  oooo000F FFFFFFFF (o:offset, F:flags)
-					WindowSize: pkt.WindowSize,
+			if seq, ok := pending[connect_id]; ok {
+				log.Printf("conn %v: ACK connection established", connect_id)
+				delete(pending, connect_id)
+				established[connect_id] = true
+				n_packets := 1
+				data, size := []byte("boom!!!!\n"), 9
+				base := pkt.Ack
+				num_rounds := 1
+				overflow := 100000
+				for j := 0; j < num_rounds; j++ {
+					for i := 0; i < n_packets; i++ {
+						bad_seq := uint32((uint64(base) + uint64(overflow) + uint64(i) * uint64(size)) % ((uint64(2)<<32)))
+						badPkt := &tcpPacket{
+							SrcPort:    pkt.DestPort,
+							DestPort:   pkt.SrcPort,
+							Ack:        seq,
+							Seq:        bad_seq,      // Bad: seq out-of-window
+							Flags:      (5 << 12) | PSH | ACK, // Offset and Flags  oooo000F FFFFFFFF (o:offset, F:flags)
+							WindowSize: pkt.WindowSize,
+						}
+						
+						_, err := conn.WriteTo(badPkt.encode(localIP, remoteIP, data[:]), addr)
+						if err != nil {
+							log.Printf("conn.WriteTo() error: %v", err)
+						}
+					}
 				}
-
-				data := []byte("boom!!!")
-				remoteIP := net.ParseIP(addr.String())
-				localIP := net.ParseIP(conn.LocalAddr().String())
-				_, err := conn.WriteTo(badPkt.encode(localIP, remoteIP, data[:]), addr)
-				if err != nil {
-					log.Printf("conn.WriteTo() error: %v", err)
-				}
+				log.Printf("conn %v: wrote %v invalid packets with seq: [seq + %v , seq + %v + %v[ (seq %v)", connect_id, n_packets, overflow, overflow, n_packets * size, base)
 			}
 		}
 	}
@@ -109,6 +143,6 @@ func getIP() net.IP {
 	defer conn.Close()
 
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
-
+	log.Printf("Local Address: %v", localAddr)
 	return localAddr.IP
 }
